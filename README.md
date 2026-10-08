@@ -60,7 +60,7 @@ The connective tissue. Wire these into your generative nodes as needed.
 
 | Node | What it does |
 |---|---|
-| **Text Generation** | Full-parameter text gen: temperature, top_p, top_k, thinking, seed. 34 model options including latest aliases, Gemini 3.1 to 3.8, 2.5, Gemma, and specialized models. If it's a knob, it's exposed. Google deprecated temperature, top_p and top_k on Gemini 3.x models. |
+| **Text Generation** | Full-parameter text gen: temperature, top_p, top_k, thinking, seed. 34 model options including latest aliases, Gemini 3.1 to 3.8, 2.5, Gemma, and specialized models. If it's a knob, it's exposed. temperature, top_p, top_k and thinking_budget only reach Gemini 2.x and Gemma; Google deprecated them on Gemini 3. |
 | **Prompt Refiner** | Feed it a rough prompt, get back a polished one. Useful before hitting your image nodes. |
 | **Multi-Turn Chat** | Stateful conversation node. Maintains message history across runs. |
 | **Structured Output** | JSON schema-constrained generation. Tell it exactly what shape of data you want back. |
@@ -72,8 +72,8 @@ Two different endpoints, both covered.
 | Node | What it does |
 |---|---|
 | **Vision Analysis** | Describe, analyze, or interrogate an image. Good for captioning or feeding into a downstream prompt. `media_resolution` sets how many tokens each image gets. |
-| **Image Generation** | Generate images via `generate_content`. Supports Nano Banana, Nano Banana 2, Nano Banana 2 Lite, and Nano Banana Pro. Up to 4 reference images, full aspect ratio selection (including 1:4, 4:1, 1:8, 8:1), 512 / 1K / 2K / 4K output, optional Google Search grounding (web and image search), seed control. |
-| **Imagen Image Generation** | Imagen 4 node using the `generate_images` endpoint. Google scheduled every Imagen 4 model for shutdown on 2026-08-17; use Image Generation with `gemini-3.1-flash-image` instead. |
+| **Image Generation** | Generate images via `generate_content`. Supports Nano Banana, Nano Banana 2, Nano Banana 2.1, Nano Banana 2 Lite, and Nano Banana Pro. 4 reference inputs that each take a batch (up to 14 images on Nano Banana 2.1 and 2), full aspect ratio selection (including 1:4, 4:1, 1:8, 8:1), 512 / 1K / 2K / 4K output, optional Google Search grounding (web and image search), seed control. |
+| **Imagen Image Generation** | Imagen 4 node using the `generate_images` endpoint. Google scheduled every Imagen 4 model for shutdown on 2026-08-17; use Image Generation with `gemini-nano-banana-2.1` instead. |
 | **Image Edit** | Text-guided image editing. Describe what you want changed. |
 | **Inpaint** | Mask-based inpainting. Feed it an image and a mask, tell it what should be there. |
 | **Outpaint** | Extend an image outward. Choose your expansion direction. |
@@ -161,10 +161,11 @@ Two different endpoints, both covered.
 
 ### generateContent (image output)
 
-- `gemini-3.1-flash-image` -- Nano Banana 2
+- `gemini-nano-banana-2.1` -- Nano Banana 2.1 (1K / 2K / 4K)
+- `gemini-3.1-flash-image` -- Nano Banana 2 (deprecated, no shutdown date yet)
 - `gemini-3.1-flash-lite-image` -- Nano Banana 2 Lite (1K only)
 - `gemini-3-pro-image` -- Nano Banana Pro
-- `gemini-2.5-flash-image` -- Nano Banana (scheduled for shutdown 2026-10-02)
+- `gemini-2.5-flash-image` -- Nano Banana (scheduled for shutdown 2027-03-15)
 
 ### predict (Imagen)
 
@@ -200,7 +201,7 @@ All nodes also have a **custom_model** override field. When Google drops somethi
 
 ## Aspect Ratios
 
-1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9, plus 1:4, 4:1, 1:8, 8:1 on Nano Banana 2 and 2 Lite.
+1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9, plus 1:4, 4:1, 1:8, 8:1 on Nano Banana 2.1, 2 and 2 Lite.
 
 ---
 
@@ -212,7 +213,8 @@ A few things that were done deliberately:
 - **Retry with jittered exponential backoff** -- transient API errors are retried with random jitter to avoid thundering-herd retries when multiple workers hit a 429 wave.
 - **Bounded, hashed client cache** -- LRU cap of 16 clients, keyed by SHA-256 of the API key (the raw key never lives in a dict key). Rotating keys across workflows can't OOM the worker.
 - **Full chunk iteration** -- responses scan all parts, not just `parts[0]`. You won't silently lose content from multi-part responses.
-- **Image candidates returned as a batch** -- ImageGen with `candidate_count > 1` returns ALL images as a batched IMAGE tensor (previously you paid for 4, got 1).
+- **Image candidates returned as a batch** -- ImageGen with `candidate_count > 1` returns ALL images as a batched IMAGE tensor (previously you paid for 4, got 1). Gemini 3 models have no `candidate_count`, so they get one request per image.
+- **No deprecated parameters on Gemini 3** -- `temperature`, `top_p`, `top_k`, `thinking_budget` and `candidate_count` are only sent to Gemini 2.x and Gemma. The inputs stay in place so saved workflows keep lining up.
 - **Mask auto-resize** -- Inpaint / ImageEdit silently match mask dims to image dims (Gemini 400s on mismatch).
 - **Lossless PNG option** -- Vision node has a `lossless` toggle for OCR / small-text / fine-grained tasks; new VisionOCR node uses it by default.
 - **API-key redaction** -- every error string surfaced to the UI / logs is run through a regex that strips `AIza[...]` keys and `x-goog-api-key:` / `Authorization:` headers.

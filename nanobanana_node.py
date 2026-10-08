@@ -24,12 +24,12 @@ try:
     )
     from .gemini_client import (
         get_client, get_api_key, retry_with_backoff,
-        redact_secret, sanitize_model_id, interactions_audio,
+        redact_secret, sanitize_model_id, interactions_audio, accepts_legacy_params,
         TEXT_MODELS, IMAGE_MODELS, IMAGEN_MODELS, IMAGEN_ASPECT_RATIOS,
         IMAGEN_SAFETY_LEVELS, TTS_MODELS, TTS_VOICES, EMBEDDING_MODELS,
         VEO_MODELS, VEO_ASPECT_RATIOS, VEO_RESOLUTIONS, LYRIA_MODELS,
         OMNI_MODELS, OMNI_RESOLUTIONS, INTERACTIONS_TTS_MODELS, TRANSCRIBE_MODELS, ALL_MODELS,
-        ASPECT_RATIOS, THINKING_LEVELS, IMAGE_SIZES,
+        ASPECT_RATIOS, THINKING_LEVELS, IMAGE_THINKING_LEVELS, IMAGE_SIZES,
     )
 except ImportError:
     # Fallback for direct testing / flat layouts
@@ -42,12 +42,12 @@ except ImportError:
     )
     from gemini_client import (
         get_client, get_api_key, retry_with_backoff,
-        redact_secret, sanitize_model_id, interactions_audio,
+        redact_secret, sanitize_model_id, interactions_audio, accepts_legacy_params,
         TEXT_MODELS, IMAGE_MODELS, IMAGEN_MODELS, IMAGEN_ASPECT_RATIOS,
         IMAGEN_SAFETY_LEVELS, TTS_MODELS, TTS_VOICES, EMBEDDING_MODELS,
         VEO_MODELS, VEO_ASPECT_RATIOS, VEO_RESOLUTIONS, LYRIA_MODELS,
         OMNI_MODELS, OMNI_RESOLUTIONS, INTERACTIONS_TTS_MODELS, TRANSCRIBE_MODELS, ALL_MODELS,
-        ASPECT_RATIOS, THINKING_LEVELS, IMAGE_SIZES,
+        ASPECT_RATIOS, THINKING_LEVELS, IMAGE_THINKING_LEVELS, IMAGE_SIZES,
     )
 
 
@@ -119,6 +119,7 @@ def _build_image_parts(ref_images, labels=True, lossless=False):
 
 def _build_config(
     *,
+    model=None,
     modalities=None,
     system_instruction=None,
     thinking_level="NONE",
@@ -137,10 +138,15 @@ def _build_config(
     media_resolution=None,
     search_grounding="off",
 ):
-    """Build a GenerateContentConfig from keyword arguments."""
+    """Build a GenerateContentConfig from keyword arguments.
+
+    temperature, top_p, top_k, thinking_budget and candidate_count are only
+    sent when `model` still takes them (see accepts_legacy_params).
+    """
     from google.genai import types
 
     kwargs = {}
+    legacy = accepts_legacy_params(model)
 
     # System instruction
     if system_instruction and system_instruction.strip():
@@ -149,11 +155,17 @@ def _build_config(
         ]
 
     # Thinking — Gemini 3 rejects thinking_level and thinking_budget in the
-    # same request, so the level wins and the budget applies on its own.
+    # same request, so the level wins. The budget applies on its own, and
+    # only on models that still take one.
     if thinking_level and thinking_level != "NONE":
         kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
     elif thinking_budget and thinking_budget > 0:
-        kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        if legacy:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        else:
+            logger.warning(
+                "thinking_budget is not sent to %s; set thinking_level instead.", model,
+            )
 
     # Image config
     img_kwargs = {}
@@ -165,18 +177,19 @@ def _build_config(
         kwargs["image_config"] = types.ImageConfig(**img_kwargs)
 
     # Generation params
-    if temperature is not None:
-        kwargs["temperature"] = temperature
-    if top_p is not None:
-        kwargs["top_p"] = top_p
-    if top_k is not None and top_k > 0:
-        kwargs["top_k"] = top_k
+    if legacy:
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if top_k is not None and top_k > 0:
+            kwargs["top_k"] = top_k
+        if candidate_count is not None and candidate_count > 1:
+            kwargs["candidate_count"] = candidate_count
     if max_output_tokens is not None and max_output_tokens > 0:
         kwargs["max_output_tokens"] = max_output_tokens
     if seed is not None and seed >= 0:
         kwargs["seed"] = seed
-    if candidate_count is not None and candidate_count > 1:
-        kwargs["candidate_count"] = candidate_count
 
     # Response modalities
     if modalities:
@@ -241,7 +254,6 @@ def _extract_image_from_stream(client, model, contents, config, return_all=False
     Raises:
         RuntimeError: if no image data is returned.
     """
-    import torch
     model_text = []
     images = []
     for chunk in client.models.generate_content_stream(
@@ -264,7 +276,15 @@ def _extract_image_from_stream(client, model, contents, config, return_all=False
             f"NanoBanana - returned no image. Model said: {redact_secret(text_msg)}"
         )
 
-    # Stack candidates — only if same dimensions. Otherwise return first.
+    return _stack_images(images)
+
+
+def _stack_images(images):
+    """Batch [1, H, W, C] image tensors into [N, H, W, C].
+
+    Stacks only if all candidates share dimensions; otherwise returns the first.
+    """
+    import torch
     if len(images) == 1:
         return images[0]
     try:
@@ -422,8 +442,8 @@ class NanoBanana_ThinkingConfig:
                     "default": 0,
                     "min": 0,
                     "max": 100000,
-                    "tooltip": "Max thinking tokens (0 = model default). Only used when "
-                               "thinking_level is NONE; Gemini 3 rejects both in one request.",
+                    "tooltip": "Max thinking tokens for Gemini 2.5 models (0 = model default). "
+                               "Gemini 3 models take thinking_level instead.",
                 }),
             },
         }
@@ -481,20 +501,20 @@ class NanoBanana_TextGen(AlwaysExecuteMixin):
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Controls randomness. Lower = more deterministic. Deprecated by Google on Gemini 3.x models.",
+                    "tooltip": "Controls randomness. Lower = more deterministic. Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                 "top_p": ("FLOAT", {
                     "default": 0.95,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.05,
-                    "tooltip": "Nucleus sampling probability cutoff. Deprecated by Google on Gemini 3.x models.",
+                    "tooltip": "Nucleus sampling probability cutoff. Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                 "top_k": ("INT", {
                     "default": 0,
                     "min": 0,
                     "max": 1000,
-                    "tooltip": "Top-K sampling (0 = disabled). Deprecated by Google on Gemini 3.x models.",
+                    "tooltip": "Top-K sampling (0 = disabled). Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                 "max_output_tokens": ("INT", {
                     "default": 0,
@@ -510,8 +530,9 @@ class NanoBanana_TextGen(AlwaysExecuteMixin):
                     "default": 0,
                     "min": 0,
                     "max": 100000,
-                    "tooltip": "Max thinking tokens (0 = model default). Only used when "
-                               "thinking_level is NONE; Gemini 3 rejects both in one request.",
+                    "tooltip": "Max thinking tokens for Gemini 2.5 models (0 = model default). "
+                               "Only used when thinking_level is NONE; Gemini 3 models take "
+                               "thinking_level instead.",
                 }),
                 "seed": ("INT", {
                     "default": -1,
@@ -554,6 +575,7 @@ class NanoBanana_TextGen(AlwaysExecuteMixin):
         client = get_client(key, network=network)
 
         config = _build_config(
+            model=final_model,
             modalities=["TEXT"],
             system_instruction=system_instruction,
             thinking_level=thinking_level,
@@ -622,7 +644,7 @@ class NanoBanana_PromptRefiner(AlwaysExecuteMixin):
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Controls randomness in refinement.",
+                    "tooltip": "Controls randomness in refinement. Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
             },
@@ -670,6 +692,7 @@ class NanoBanana_PromptRefiner(AlwaysExecuteMixin):
         )
 
         config = _build_config(
+            model=final_model,
             modalities=["TEXT"],
             system_instruction=sys_text,
             thinking_level=thinking_level,
@@ -727,7 +750,7 @@ class NanoBanana_MultiTurn(AlwaysExecuteMixin):
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Controls randomness.",
+                    "tooltip": "Controls randomness. Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
             },
@@ -782,6 +805,7 @@ class NanoBanana_MultiTurn(AlwaysExecuteMixin):
         )
 
         config = _build_config(
+            model=final_model,
             modalities=["TEXT"],
             system_instruction=system_instruction,
             temperature=temperature,
@@ -844,7 +868,7 @@ class NanoBanana_StructuredOutput(AlwaysExecuteMixin):
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Lower temperature recommended for structured output.",
+                    "tooltip": "Lower temperature recommended for structured output. Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
             },
@@ -876,6 +900,7 @@ class NanoBanana_StructuredOutput(AlwaysExecuteMixin):
             raise ValueError(f"Invalid JSON schema: {e}")
 
         config = _build_config(
+            model=final_model,
             modalities=["TEXT"],
             system_instruction=system_instruction,
             temperature=temperature,
@@ -943,7 +968,7 @@ class NanoBanana_Vision(AlwaysExecuteMixin):
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Controls randomness. Lower = more focused analysis.",
+                    "tooltip": "Controls randomness. Lower = more focused analysis. Gemini 2.x and Gemma only; not sent to Gemini 3 models.",
                 }),
                 "lossless": ("BOOLEAN", {
                     "default": False,
@@ -1003,6 +1028,7 @@ class NanoBanana_Vision(AlwaysExecuteMixin):
         contents = [types.Content(role="user", parts=parts)]
 
         config = _build_config(
+            model=final_model,
             modalities=["TEXT"],
             system_instruction=system_instruction,
             temperature=temperature,
@@ -1035,7 +1061,7 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
                     "tooltip": "NanoBanana - API key. Leave blank to use GEMINI_API_KEY env var.",
                 }),
                 "model": (IMAGE_MODELS, {
-                    "default": "gemini-3.1-flash-image",
+                    "default": "gemini-nano-banana-2.1",
                     "tooltip": "NanoBanana - image model. For Imagen models, use the dedicated Imagen Image Generation node instead.",
                 }),
                 "custom_model": ("STRING", {
@@ -1049,7 +1075,7 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
                 }),
                 "aspect_ratio": (ASPECT_RATIOS, {
                     "default": "16:9",
-                    "tooltip": "Output image aspect ratio. 1:4, 4:1, 1:8 and 8:1 are Nano Banana 2 and 2 Lite only.",
+                    "tooltip": "Output image aspect ratio. 1:4, 4:1, 1:8 and 8:1 are Nano Banana 2.1, 2 and 2 Lite only.",
                 }),
                 "image_size": (IMAGE_SIZES, {
                     "default": "4K",
@@ -1062,16 +1088,19 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
                     "default": "",
                     "tooltip": "System instruction for the image generation model.",
                 }),
-                "thinking_level": (THINKING_LEVELS, {
+                "thinking_level": (IMAGE_THINKING_LEVELS, {
                     "default": "NONE",
-                    "tooltip": "How much the model should reason before generating.",
+                    "tooltip": "How much the model should reason before generating. "
+                               "Nano Banana 2.1 takes MINIMAL, MEDIUM or HIGH (default MEDIUM); "
+                               "Nano Banana 2 and 2 Lite take MINIMAL or HIGH (default MINIMAL). "
+                               "NONE uses the model default.",
                 }),
                 "temperature": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Controls randomness in generation.",
+                    "tooltip": "Controls randomness in generation. gemini-2.5-flash-image only; not sent to Gemini 3 models.",
                 }),
                 "seed": ("INT", {
                     "default": -1,
@@ -1085,9 +1114,12 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
                     "max": 4,
                     "tooltip": "Number of image candidates to generate. All "
                                "are returned as a batch — wire into Preview "
-                               "Image or save the lot.",
+                               "Image or save the lot. Gemini 3 models get one "
+                               "request per image.",
                 }),
-                "ref_image_1": ("IMAGE", {"tooltip": "First reference image."}),
+                "ref_image_1": ("IMAGE", {"tooltip": "First reference image. Every reference input "
+                                                     "takes a batch; Nano Banana 2.1 and 2 mix up to "
+                                                     "14 images."}),
                 "ref_image_2": ("IMAGE", {"tooltip": "Second reference image."}),
                 "ref_image_3": ("IMAGE", {"tooltip": "Third reference image."}),
                 "ref_image_4": ("IMAGE", {"tooltip": "Fourth reference image."}),
@@ -1098,7 +1130,7 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
                 "search_grounding": (["off", "web", "web + image"], {
                     "default": "off",
-                    "tooltip": "Ground the image in Google Search results. Image search needs gemini-3.1-flash-image; web search is not available on gemini-3.1-flash-lite-image.",
+                    "tooltip": "Ground the image in Google Search results. Image search needs gemini-nano-banana-2.1 or gemini-3.1-flash-image; web search is not available on gemini-3.1-flash-lite-image.",
                 }),
             },
         }
@@ -1150,6 +1182,7 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
         contents = [types.Content(role="user", parts=parts)]
 
         config = _build_config(
+            model=final_model,
             modalities=["IMAGE", "TEXT"],
             system_instruction=system_instruction,
             thinking_level=thinking_level,
@@ -1161,6 +1194,22 @@ class NanoBanana_ImageGen(AlwaysExecuteMixin):
             safety_settings_json=safety_settings_json,
             search_grounding=search_grounding,
         )
+
+        if candidate_count > 1 and not accepts_legacy_params(final_model):
+            # Gemini 3 has no candidate_count, so ask for the images one at a
+            # time. A fixed seed is offset per image so they don't all match.
+            configs = [
+                config if config.seed is None
+                else config.model_copy(update={"seed": (config.seed + i) % 2**31})
+                for i in range(candidate_count)
+            ]
+            images = [
+                retry_with_backoff(
+                    lambda c=c: _extract_image_from_stream(client, final_model, contents, c)
+                )
+                for c in configs
+            ]
+            return (_stack_images(images),)
 
         def _call():
             # Return ALL candidates (v2.0 silently dropped 2-4 even though
@@ -1187,7 +1236,7 @@ class NanoBanana_ImageEdit(AlwaysExecuteMixin):
                     "tooltip": "NanoBanana - API key. Leave blank to use GEMINI_API_KEY env var.",
                 }),
                 "model": (IMAGE_MODELS, {
-                    "default": "gemini-3.1-flash-image",
+                    "default": "gemini-nano-banana-2.1",
                     "tooltip": "Image-capable Gemini model for editing.",
                 }),
                 "custom_model": ("STRING", {
@@ -1290,6 +1339,7 @@ class NanoBanana_ImageEdit(AlwaysExecuteMixin):
         contents = [types.Content(role="user", parts=parts)]
 
         config = _build_config(
+            model=final_model,
             modalities=["IMAGE", "TEXT"],
             system_instruction=system_instruction,
             aspect_ratio=aspect_ratio,
@@ -1316,7 +1366,7 @@ class NanoBanana_Inpaint(AlwaysExecuteMixin):
                     "tooltip": "NanoBanana - API key. Leave blank to use GEMINI_API_KEY env var.",
                 }),
                 "model": (IMAGE_MODELS, {
-                    "default": "gemini-3.1-flash-image",
+                    "default": "gemini-nano-banana-2.1",
                     "tooltip": "Image-capable Gemini model for inpainting.",
                 }),
                 "custom_model": ("STRING", {
@@ -1406,6 +1456,7 @@ class NanoBanana_Inpaint(AlwaysExecuteMixin):
         )
 
         config = _build_config(
+            model=final_model,
             modalities=["IMAGE", "TEXT"],
             system_instruction=sys_text,
         )
@@ -1432,7 +1483,7 @@ class NanoBanana_Outpaint(AlwaysExecuteMixin):
                     "tooltip": "NanoBanana - API key. Leave blank to use GEMINI_API_KEY env var.",
                 }),
                 "model": (IMAGE_MODELS, {
-                    "default": "gemini-3.1-flash-image",
+                    "default": "gemini-nano-banana-2.1",
                     "tooltip": "Image-capable Gemini model for outpainting.",
                 }),
                 "custom_model": ("STRING", {
@@ -1513,6 +1564,7 @@ class NanoBanana_Outpaint(AlwaysExecuteMixin):
         )
 
         config = _build_config(
+            model=final_model,
             modalities=["IMAGE", "TEXT"],
             system_instruction=sys_text,
             aspect_ratio=aspect_ratio,
@@ -1618,7 +1670,7 @@ class NanoBanana_ImagenGen(AlwaysExecuteMixin):
 
     Imagen uses a separate API endpoint (generate_images) from Gemini's image
     generation. Google scheduled every Imagen 4 model for shutdown on
-    2026-08-17; use the Image Generation node with gemini-3.1-flash-image instead.
+    2026-08-17; use the Image Generation node with gemini-nano-banana-2.1 instead.
     """
 
     @classmethod
@@ -1632,7 +1684,7 @@ class NanoBanana_ImagenGen(AlwaysExecuteMixin):
                 }),
                 "model": (IMAGEN_MODELS, {
                     "default": "imagen-4.0-generate-001",
-                    "tooltip": "Imagen model. All Imagen 4 models were scheduled for shutdown on 2026-08-17; use Image Generation with gemini-3.1-flash-image.",
+                    "tooltip": "Imagen model. All Imagen 4 models were scheduled for shutdown on 2026-08-17; use Image Generation with gemini-nano-banana-2.1.",
                 }),
                 "prompt": ("STRING", {
                     "multiline": True,

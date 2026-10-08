@@ -282,6 +282,25 @@ def sanitize_model_id(model_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Legacy generation parameters
+# ---------------------------------------------------------------------------
+
+# Gemini 3 is tuned for its default sampling settings and takes thinking_level
+# instead of thinking_budget. Since Gemini 3.6 Flash the API ignores
+# temperature, top_p and top_k, Google has announced that upcoming models
+# reject them and thinking_budget with 400 INVALID_ARGUMENT, and
+# candidate_count is unsupported from Gemini 3 on. Only these families still
+# take them.
+LEGACY_PARAM_MODEL_PREFIXES = ("gemini-2.", "gemma-")
+
+
+def accepts_legacy_params(model) -> bool:
+    """True if `model` still takes temperature, top_p, top_k, thinking_budget
+    and candidate_count (Gemini 2.x and Gemma); False for Gemini 3 and later."""
+    return bool(model) and model.removeprefix("models/").startswith(LEGACY_PARAM_MODEL_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
 # Interactions API audio helpers (Lyria, Gemini 3.8 TTS)
 # ---------------------------------------------------------------------------
 
@@ -364,10 +383,11 @@ TEXT_MODELS = [
 
 # Image generation via generate_content (native multimodal output)
 IMAGE_MODELS = [
-    "gemini-3.1-flash-image",       # Nano Banana 2
+    "gemini-nano-banana-2.1",       # Nano Banana 2.1 (no 512 size)
+    "gemini-3.1-flash-image",       # Nano Banana 2 (deprecated 2026-10-06, no shutdown date yet)
     "gemini-3.1-flash-lite-image",  # Nano Banana 2 Lite (1K only)
     "gemini-3-pro-image",           # Nano Banana Pro
-    "gemini-2.5-flash-image",       # Nano Banana (scheduled shutdown 2026-10-02)
+    "gemini-2.5-flash-image",       # Nano Banana (scheduled shutdown 2027-03-15)
 ]
 
 # Imagen uses generate_images (predict) endpoint — different API path.
@@ -464,6 +484,10 @@ ASPECT_RATIOS = [
 # "don't set thinking_config at all". v2.1 keeps NONE as the sentinel but
 # replaces NORMAL with the actual SDK values MINIMAL/MEDIUM.
 THINKING_LEVELS = ["NONE", "MINIMAL", "LOW", "MEDIUM", "HIGH"]
+
+# Nano Banana 2.1 takes MINIMAL / MEDIUM / HIGH, Nano Banana 2 and 2 Lite take
+# MINIMAL / HIGH. No image model takes LOW.
+IMAGE_THINKING_LEVELS = ["NONE", "MINIMAL", "MEDIUM", "HIGH"]
 
 IMAGE_SIZES = ["AUTO", "1K", "2K", "4K", "512"]
 

@@ -5,6 +5,34 @@ All notable changes to ComfyUI-NanoBanana2 are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Follows Google's 2026-10-06 parameter deprecation notice and adds Nano
+Banana 2.1.
+
+### Added
+
+- **Model:** `gemini-nano-banana-2.1` (Nano Banana 2.1), now the default for
+  Image Generation, Image Edit, Inpaint and Outpaint. It outputs 1K, 2K or 4K
+  (no 512) and takes the MINIMAL, MEDIUM (default) and HIGH thinking levels.
+
+### Changed
+
+- **Legacy generation parameters only reach Gemini 2.x and Gemma.** Gemini 3
+  models are no longer sent `temperature`, `top_p`, `top_k`, `thinking_budget`
+  or `candidate_count`. Google deprecated the sampling parameters from Gemini
+  3.6 Flash on (the API ignores them), Gemini 3 takes `thinking_level` instead
+  of a budget, and upcoming models reject both with 400 INVALID_ARGUMENT. The
+  inputs stay where they were so saved workflows keep their widget values, and
+  a `thinking_budget` set for a Gemini 3 model is logged as not sent.
+- **Image Generation `candidate_count`** on Gemini 3 models sends one request
+  per image instead of the unsupported `candidate_count` parameter. A fixed
+  seed is offset per image.
+- **Image Generation `thinking_level`** offers NONE, MINIMAL, MEDIUM and HIGH.
+  No Nano Banana model takes LOW.
+- `gemini-3.1-flash-image` is marked deprecated (no shutdown date yet), and
+  `gemini-2.5-flash-image` shows its 2027-03-15 shutdown date.
+
 ## [2.7.0] — 2026-10-02
 
 Catches the pack up with the current Gemini API: new model generations, the

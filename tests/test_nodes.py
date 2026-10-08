@@ -54,13 +54,14 @@ def test_imagen_safety_filter_dropdown_has_multiple_options():
 
 
 def test_image_models_includes_nano_banana_2_as_default():
-    """v2.0 default was the older 2.5-flash-image; v2.1 should keep the
-    upstream fix that defaults to 3.1-flash-image-preview (Nano Banana 2)."""
+    """v2.0 default was the older 2.5-flash-image; ImageGen should default
+    to a current Nano Banana model."""
+    from gemini_client import IMAGE_MODELS
     cls = _pkg.NODE_CLASS_MAPPINGS["NanoBanana_ImageGen"]
     it = cls.INPUT_TYPES()
     model_field = it["required"]["model"]
     default = model_field[1]["default"]
-    assert "3.1" in default or "image" in default, \
+    assert default in IMAGE_MODELS and default != "gemini-2.5-flash-image", \
         f"ImageGen default {default!r} looks wrong"
 
 

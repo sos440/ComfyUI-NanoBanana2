@@ -27,7 +27,7 @@ try:
         tensor_to_jpeg_bytes, tensor_to_png_bytes, comfy_to_audio_bytes,
     )
     from .gemini_client import (
-        get_client, get_api_key, retry_with_backoff, interactions_audio,
+        get_client, get_api_key, retry_with_backoff, interactions_audio, accepts_legacy_params,
         TEXT_MODELS, TTS_MODELS, TTS_VOICES, EMBEDDING_MODELS,
         THINKING_LEVELS, INTERACTIONS_TTS_MODELS, TRANSCRIBE_MODELS,
     )
@@ -37,7 +37,7 @@ except ImportError:
         tensor_to_jpeg_bytes, tensor_to_png_bytes, comfy_to_audio_bytes,
     )
     from gemini_client import (
-        get_client, get_api_key, retry_with_backoff, interactions_audio,
+        get_client, get_api_key, retry_with_backoff, interactions_audio, accepts_legacy_params,
         TEXT_MODELS, TTS_MODELS, TTS_VOICES, EMBEDDING_MODELS,
         THINKING_LEVELS, INTERACTIONS_TTS_MODELS, TRANSCRIBE_MODELS,
     )
@@ -135,7 +135,7 @@ class NanoBanana_VisionWithFile(AlwaysExecuteMixin):
             },
             "optional": {
                 "custom_model": ("STRING", {"default": ""}),
-                "temperature": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "temperature": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Gemini 2.x and Gemma only; not sent to Gemini 3 models."}),
                 "thinking_level": (THINKING_LEVELS, {"default": "NONE"}),
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
             },
@@ -157,7 +157,7 @@ class NanoBanana_VisionWithFile(AlwaysExecuteMixin):
         if not file_uri.strip():
             raise ValueError("file_uri is empty — upload via NanoBanana Files Upload first.")
 
-        cfg_kwargs = {"temperature": temperature}
+        cfg_kwargs = {"temperature": temperature} if accepts_legacy_params(final_model) else {}
         if thinking_level != "NONE":
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
         config = types.GenerateContentConfig(**cfg_kwargs)
@@ -201,7 +201,7 @@ class NanoBanana_TextGenSearch(AlwaysExecuteMixin):
             "optional": {
                 "custom_model": ("STRING", {"default": ""}),
                 "system_instruction": ("STRING", {"multiline": True, "default": ""}),
-                "temperature": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "temperature": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Gemini 2.x and Gemma only; not sent to Gemini 3 models."}),
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
             },
         }
@@ -219,10 +219,9 @@ class NanoBanana_TextGenSearch(AlwaysExecuteMixin):
         final_model = custom_model.strip() if custom_model and custom_model.strip() else model
         client = get_client(key, network=network)
 
-        cfg_kwargs = {
-            "tools": [types.Tool(google_search=types.GoogleSearch())],
-            "temperature": temperature,
-        }
+        cfg_kwargs = {"tools": [types.Tool(google_search=types.GoogleSearch())]}
+        if accepts_legacy_params(final_model):
+            cfg_kwargs["temperature"] = temperature
         if system_instruction.strip():
             cfg_kwargs["system_instruction"] = [types.Part.from_text(text=system_instruction.strip())]
         config = types.GenerateContentConfig(**cfg_kwargs)
@@ -270,7 +269,7 @@ class NanoBanana_TextGenCode(AlwaysExecuteMixin):
             },
             "optional": {
                 "custom_model": ("STRING", {"default": ""}),
-                "temperature": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "temperature": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 2.0, "step": 0.05, "tooltip": "Gemini 2.x and Gemma only; not sent to Gemini 3 models."}),
                             "network": ("NB_NETWORK", {"tooltip": "Optional. Wire a NanoBanana - Network Route node here to route this request through that proxy (e.g. US egress)."}),
             },
         }
@@ -291,7 +290,7 @@ class NanoBanana_TextGenCode(AlwaysExecuteMixin):
         # (older name "CodeExecution" was removed).
         config = types.GenerateContentConfig(
             tools=[types.Tool(code_execution=types.ToolCodeExecution())],
-            temperature=temperature,
+            temperature=temperature if accepts_legacy_params(final_model) else None,
         )
 
         def _call():
@@ -597,7 +596,9 @@ class NanoBanana_AudioTranscribe(AlwaysExecuteMixin):
         def _call():
             r = client.models.generate_content(
                 model=final_model, contents=contents,
-                config=types.GenerateContentConfig(temperature=0.0),
+                config=types.GenerateContentConfig(
+                    temperature=0.0 if accepts_legacy_params(final_model) else None,
+                ),
             )
             return r.text.strip() if r.text else ""
 
@@ -757,10 +758,9 @@ class NanoBanana_VisionOCR(AlwaysExecuteMixin):
             ])
         ]
 
-        cfg_kwargs = {
-            "system_instruction": [types.Part.from_text(text=instr)],
-            "temperature": 0.0,
-        }
+        cfg_kwargs = {"system_instruction": [types.Part.from_text(text=instr)]}
+        if accepts_legacy_params(final_model):
+            cfg_kwargs["temperature"] = 0.0
         if mode == "structured_json":
             cfg_kwargs["response_mime_type"] = "application/json"
         if media_resolution != "AUTO":

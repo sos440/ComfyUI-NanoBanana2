@@ -1,5 +1,6 @@
 """Tests for the v2.7 surface: current model IDs, Interactions API nodes
-(Lyria, Gemini 3.8 TTS, Omni video, URL context) and new parameters.
+(Lyria, Gemini 3.8 TTS, Omni video, URL context) and new parameters, plus
+the legacy generation parameters that only reach Gemini 2.x and Gemma.
 
 Every Gemini client is a fake; nothing touches the network.
 """
@@ -77,8 +78,8 @@ def test_new_models_present():
     assert {"gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
             "gemini-3.5-flash", "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite"} <= set(client_mod.TEXT_MODELS)
-    assert {"gemini-3.1-flash-image", "gemini-3.1-flash-lite-image",
-            "gemini-3-pro-image"} <= set(client_mod.IMAGE_MODELS)
+    assert {"gemini-nano-banana-2.1", "gemini-3.1-flash-image",
+            "gemini-3.1-flash-lite-image", "gemini-3-pro-image"} <= set(client_mod.IMAGE_MODELS)
     assert {"gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"} <= set(client_mod.TTS_MODELS)
     assert "lyria-3.5" in client_mod.LYRIA_MODELS
     assert client_mod.OMNI_MODELS == ["gemini-omni-1.1-flash"]
@@ -102,7 +103,7 @@ def test_defaults_moved_off_shut_down_models():
     for node in ("NanoBanana_ImageGen", "NanoBanana_ImageEdit",
                  "NanoBanana_Inpaint", "NanoBanana_Outpaint"):
         spec = NODES[node].INPUT_TYPES()["required"]["model"]
-        assert spec[1]["default"] == "gemini-3.1-flash-image"
+        assert spec[1]["default"] == "gemini-nano-banana-2.1"
 
 
 def test_image_option_additions():
@@ -148,9 +149,24 @@ class TestBuildConfig:
         assert cfg.thinking_config.thinking_budget is None
 
     def test_budget_applies_without_level(self):
-        cfg = core._build_config(thinking_level="NONE", thinking_budget=2000)
+        cfg = core._build_config(model="gemini-2.5-flash", thinking_level="NONE", thinking_budget=2000)
         assert cfg.thinking_config.thinking_budget == 2000
         assert cfg.thinking_config.thinking_level is None
+
+    def test_budget_not_sent_to_gemini_3(self):
+        assert core._build_config(model="gemini-3.8-flash", thinking_budget=2000).thinking_config is None
+
+    def test_sampling_params_only_reach_legacy_models(self):
+        params = dict(temperature=0.7, top_p=0.95, top_k=40, candidate_count=2)
+        cfg = core._build_config(model="gemini-2.5-flash", **params)
+        assert (cfg.temperature, cfg.top_p, cfg.top_k, cfg.candidate_count) == (0.7, 0.95, 40, 2)
+        for model in ("gemini-3.8-flash", "gemini-nano-banana-2.1", None):
+            cfg = core._build_config(model=model, **params)
+            assert (cfg.temperature, cfg.top_p, cfg.top_k, cfg.candidate_count) == (None,) * 4
+
+    def test_seed_and_max_output_tokens_still_sent_to_gemini_3(self):
+        cfg = core._build_config(model="gemini-3.8-flash", seed=7, max_output_tokens=100)
+        assert (cfg.seed, cfg.max_output_tokens) == (7, 100)
 
     def test_no_thinking_by_default(self):
         assert core._build_config().thinking_config is None
@@ -542,3 +558,113 @@ def test_model_selector_new_categories():
     assert select("gemini-3.5-transcribe", "transcribe") == ("gemini-3.5-transcribe",)
     with pytest.raises(ValueError):
         select("gemini-omni-1.1-flash", "veo")
+
+
+# ---------------------------------------------------------------------------
+# Legacy generation parameters (temperature etc.) only reach Gemini 2.x / Gemma
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("model, legacy", [
+    ("gemini-2.5-flash", True),
+    ("gemini-2.5-flash-image", True),
+    ("models/gemini-2.5-pro", True),
+    ("gemma-3-27b-it", True),
+    ("gemini-3.8-flash", False),
+    ("gemini-3.1-flash-image", False),
+    ("gemini-nano-banana-2.1", False),
+    ("gemini-flash-latest", False),
+    ("", False),
+    (None, False),
+])
+def test_accepts_legacy_params(model, legacy):
+    assert client_mod.accepts_legacy_params(model) is legacy
+
+
+@pytest.mark.parametrize("module, node, method, args", [
+    (core, "NanoBanana_TextGen", "generate", ("", "prompt")),
+    (core, "NanoBanana_PromptRefiner", "refine_prompt", ("", "a cat")),
+    (core, "NanoBanana_MultiTurn", "chat", ("", "hi")),
+    (core, "NanoBanana_StructuredOutput", "generate", ("", "prompt", "{}")),
+    (core, "NanoBanana_Vision", "analyze", ("", "describe")),
+    (extra, "NanoBanana_VisionWithFile", "ask", ("https://x/files/a", "application/pdf", "q")),
+    (extra, "NanoBanana_TextGenSearch", "generate", ("prompt",)),
+    (extra, "NanoBanana_TextGenCode", "generate", ("prompt",)),
+    (extra, "NanoBanana_VisionOCR", "ocr", (_image(),)),
+    (extra, "NanoBanana_AudioTranscribe", "transcribe", (_audio_input(),)),
+])
+@pytest.mark.parametrize("model, legacy", [("gemini-2.5-flash", True), ("gemini-3.8-flash", False)])
+def test_temperature_only_reaches_legacy_models(monkeypatch, module, node, method, args, model, legacy):
+    models = FakeModels(text="ok", candidates=[])
+    _patch_client(monkeypatch, module, SimpleNamespace(models=models))
+    getattr(NODES[node](), method)("key", model, *args)
+    assert (models.calls[0]["config"].temperature is not None) == legacy
+
+
+@pytest.mark.parametrize("model, legacy", [("gemini-2.5-flash", True), ("gemini-3.8-flash", False)])
+def test_text_gen_sampling_and_budget(monkeypatch, model, legacy):
+    models = FakeModels(text="ok")
+    _patch_client(monkeypatch, core, SimpleNamespace(models=models))
+    NODES["NanoBanana_TextGen"]().generate("key", model, "", "prompt", top_k=40, thinking_budget=500)
+    config = models.calls[0]["config"]
+    assert [v is not None for v in (config.top_p, config.top_k, config.thinking_config)] == [legacy] * 3
+
+
+def _png_bytes():
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class FakeImageModels:
+    def __init__(self):
+        self.configs = []
+
+    def generate_content_stream(self, model, contents, config):
+        self.configs.append(config)
+        part = SimpleNamespace(inline_data=SimpleNamespace(data=_png_bytes()), text=None)
+        return [SimpleNamespace(parts=[part])]
+
+
+def _generate_image(monkeypatch, model, **kwargs):
+    models = FakeImageModels()
+    _patch_client(monkeypatch, core, SimpleNamespace(models=models))
+    out = NODES["NanoBanana_ImageGen"]().generate_image(
+        "key", model, "", "a banana", "1:1", "1K", **kwargs,
+    )
+    return models.configs, out[0]
+
+
+def test_image_gen_sends_no_temperature_to_gemini_3(monkeypatch):
+    configs, image = _generate_image(monkeypatch, "gemini-nano-banana-2.1", temperature=1.0)
+    assert len(configs) == 1
+    assert configs[0].temperature is None and configs[0].candidate_count is None
+    assert configs[0].image_config.image_size == "1K"
+    assert image.shape == (1, 8, 8, 3)
+
+
+def test_image_gen_candidates_on_gemini_3_are_separate_requests(monkeypatch):
+    configs, image = _generate_image(
+        monkeypatch, "gemini-nano-banana-2.1", seed=2147483646, candidate_count=3,
+    )
+    assert [c.seed for c in configs] == [2147483646, 2147483647, 0]
+    assert all(c.candidate_count is None for c in configs)
+    assert image.shape[0] == 3
+
+
+def test_image_gen_random_seed_stays_unset_per_candidate(monkeypatch):
+    configs, _ = _generate_image(monkeypatch, "gemini-3.1-flash-image", candidate_count=2)
+    assert [c.seed for c in configs] == [None, None]
+
+
+def test_image_gen_legacy_model_keeps_candidate_count(monkeypatch):
+    configs, _ = _generate_image(
+        monkeypatch, "gemini-2.5-flash-image", temperature=0.5, candidate_count=2,
+    )
+    assert len(configs) == 1
+    assert (configs[0].candidate_count, configs[0].temperature) == (2, 0.5)
+
+
+def test_image_gen_thinking_levels_skip_low():
+    spec = NODES["NanoBanana_ImageGen"].INPUT_TYPES()["optional"]["thinking_level"]
+    assert spec[0] == ["NONE", "MINIMAL", "MEDIUM", "HIGH"]
